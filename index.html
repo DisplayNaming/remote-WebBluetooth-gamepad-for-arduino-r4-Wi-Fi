@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<style>
+  body { background:#111; color:#5f5; margin:0; overflow:hidden; touch-action:none; user-select:none; font-family:monospace; }
+  .top { position:absolute; top:10px; width:100%; text-align:center; }
+  .btn { width:62px; height:52px; background:#222; color:#5f5; border:1px solid #444; font-size:13px; margin:2px; display:inline-block; line-height:52px; text-align:center; }
+  .btn:active, .btn.act { background:#5f5; color:#111; font-weight:bold; }
+  #con { width:130px; border-color:#5f5; font-weight:bold; }
+  /* Квадратная зона джойстика */
+  .base { width:220px; height:220px; background:#1a1a1a; border:2px solid #444; position:absolute; top:58%; left:50%; transform:translate(-50%,-50%); }
+  .stick { width:46px; height:46px; background:#5f5; position:absolute; top:87px; left:87px; pointer-events:none; }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div id="con" class="btn" onclick="connectBLE()">CONNECT BLE</div><br><br>
+  <div class="btn cmd" data-c="1">Q</div>
+  <div class="btn cmd" data-c="2">E</div>
+  <div class="btn cmd" data-c="3">R</div>
+  <div class="btn cmd" data-c="4">T</div>
+  <div class="btn cmd" data-c="5">Y</div>
+</div>
+
+<div id="bL" class="base"><div id="sL" class="stick"></div></div>
+
+<script>
+const SVC_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+const CHR_UUID = '19b10001-e8f2-537e-4f6c-d104768a1214';
+let bleChar = null, busy = false;
+let x = 0, y = 0, cmd = 0, last = 0;
+
+async function connectBLE() {
+  try {
+    const dev = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'RC_CAR' }],
+      optionalServices: [SVC_UUID]
+    });
+    const srv = await dev.gatt.connect();
+    const svc = await srv.getPrimaryService(SVC_UUID);
+    bleChar = await svc.getCharacteristic(CHR_UUID);
+    document.getElementById('con').innerText = 'CONNECTED';
+    document.getElementById('con').style.background = '#5f5';
+    document.getElementById('con').style.color = '#111';
+  } catch (e) { alert('BLE Err: ' + e); }
+}
+
+// Отправка 3 байт: [X (-127..127), Y (-127..127), CMD (0..5)]
+async function send(force) {
+  const now = Date.now();
+  if (!bleChar || (!force && (busy || now - last < 25))) return;
+  last = now; busy = true;
+  const buf = new Int8Array([x, y, cmd]);
+  try {
+    await bleChar.writeValueWithoutResponse(buf);
+  } catch (e) {}
+  busy = false;
+}
+
+// Квадратный джойстик
+const bL = document.getElementById('bL'), sL = document.getElementById('sL');
+let joyId = -1;
+
+document.addEventListener('touchstart', e => {
+  for (let t of e.changedTouches) {
+    let el = document.elementFromPoint(t.clientX, t.clientY);
+    if (joyId < 0 && el === bL) { joyId = t.identifier; moveJoy(t); }
+    else if (el && el.classList.contains('cmd')) {
+      el.classList.add('act');
+      cmd = parseInt(el.dataset.c);
+      send(true);
+    }
+  }
+  if (e.cancelable) e.preventDefault();
+}, { passive: false });
+
+document.addEventListener('touchmove', e => {
+  for (let t of e.changedTouches) {
+    if (t.identifier === joyId) moveJoy(t);
+    else {
+      // Позволяет водить зажатым пальцем между кнопками Q-E-R-T-Y
+      let el = document.elementFromPoint(t.clientX, t.clientY);
+      document.querySelectorAll('.cmd').forEach(b => b.classList.remove('act'));
+      if (el && el.classList.contains('cmd')) {
+        el.classList.add('act');
+        let newCmd = parseInt(el.dataset.c);
+        if (newCmd !== cmd) { cmd = newCmd; send(true); }
+      } else if (cmd !== 0) { cmd = 0; send(true); }
+    }
+  }
+  if (e.cancelable) e.preventDefault();
+}, { passive: false });
+
+document.addEventListener('touchend', e => {
+  for (let t of e.changedTouches) {
+    if (t.identifier === joyId) {
+      joyId = -1; x = 0; y = 0;
+      sL.style.transform = 'translate(0px,0px)';
+      send(true);
+    } else {
+      document.querySelectorAll('.cmd').forEach(b => b.classList.remove('act'));
+      if (cmd !== 0) { cmd = 0; send(true); }
+    }
+  }
+});
+
+function moveJoy(t) {
+  const r = bL.getBoundingClientRect();
+  let dx = Math.max(-87, Math.min(87, t.clientX - (r.left + 110)));
+  let dy = Math.max(-87, Math.min(87, t.clientY - (r.top + 110)));
+  sL.style.transform = `translate(${dx}px, ${dy}px)`;
+  x = Math.round((dx / 87) * 127);
+  y = Math.round((-dy / 87) * 127);
+  send(false);
+}
+</script>
+</body>
+</html>
