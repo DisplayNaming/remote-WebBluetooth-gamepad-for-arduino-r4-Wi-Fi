@@ -4,19 +4,24 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <style>
   body { background:#111; color:#5f5; margin:0; overflow:hidden; touch-action:none; user-select:none; font-family:monospace; }
-  .top { position:absolute; top:10px; width:100%; text-align:center; }
-  .btn { width:62px; height:52px; background:#222; color:#5f5; border:1px solid #444; font-size:13px; margin:2px; display:inline-block; line-height:52px; text-align:center; }
+  .top { position:absolute; top:10px; width:100%; text-align:center; z-index:10; }
+  .btn { width:60px; height:48px; background:#222; color:#5f5; border:1px solid #444; font-size:13px; margin:2px; display:inline-block; line-height:48px; text-align:center; cursor:pointer; }
   .btn:active, .btn.act { background:#5f5; color:#111; font-weight:bold; }
-  #con { width:130px; border-color:#5f5; font-weight:bold; }
-  /* Квадратная зона джойстика */
-  .base { width:220px; height:220px; background:#1a1a1a; border:2px solid #444; position:absolute; top:58%; left:50%; transform:translate(-50%,-50%); }
-  .stick { width:46px; height:46px; background:#5f5; position:absolute; top:87px; left:87px; pointer-events:none; }
+  #con { width:130px; height:38px; line-height:38px; border-color:#5f5; font-weight:bold; margin-bottom:6px; }
+  #wfi { width:110px; height:38px; line-height:38px; border-color:#f55; color:#f55; font-weight:bold; margin-bottom:6px; }
+  .base { width:160px; height:160px; background:#1a1a1a; border:2px solid #444; position:absolute; top:60%; margin-top:-80px; cursor:crosshair; }
+  #bL { left:4%; }
+  #bR { right:4%; }
+  .stick { width:40px; height:40px; position:absolute; top:60px; left:60px; pointer-events:none; }
+  #sL { background:#5f5; }
+  #sR { background:#f55; }
 </style>
 </head>
 <body>
 
 <div class="top">
-  <div id="con" class="btn" onclick="connectBLE()">CONNECT BLE</div><br><br>
+  <div id="con" class="btn" onclick="connectBLE()">CONNECT BLE</div>
+  <div id="wfi" class="btn" onclick="switchToWiFi()">TO WI-FI</div><br>
   <div class="btn cmd" data-c="1">Q</div>
   <div class="btn cmd" data-c="2">E</div>
   <div class="btn cmd" data-c="3">R</div>
@@ -25,20 +30,21 @@
 </div>
 
 <div id="bL" class="base"><div id="sL" class="stick"></div></div>
+<div id="bR" class="base"><div id="sR" class="stick"></div></div>
 
 <script>
 const SVC_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
 const CHR_UUID = '19b10001-e8f2-537e-4f6c-d104768a1214';
-let bleChar = null, busy = false;
-let x = 0, y = 0, cmd = 0, last = 0;
+let bleDev = null, bleChar = null, busy = false;
+let x = 0, y = 0, x1 = 0, y1 = 0, cmd = 0, last = 0;
 
 async function connectBLE() {
   try {
-    const dev = await navigator.bluetooth.requestDevice({
+    bleDev = await navigator.bluetooth.requestDevice({
       filters: [{ name: 'RC_CAR' }],
       optionalServices: [SVC_UUID]
     });
-    const srv = await dev.gatt.connect();
+    const srv = await bleDev.gatt.connect();
     const svc = await srv.getPrimaryService(SVC_UUID);
     bleChar = await svc.getCharacteristic(CHR_UUID);
     document.getElementById('con').innerText = 'CONNECTED';
@@ -47,74 +53,121 @@ async function connectBLE() {
   } catch (e) { alert('BLE Err: ' + e); }
 }
 
-// Отправка 3 байт: [X (-127..127), Y (-127..127), CMD (0..5)]
+// Отправка команды 99 на плату, разрыв BLE и переход на http://192.168.4.1
+async function switchToWiFi() {
+  if (bleChar) {
+    try {
+      await bleChar.writeValueWithoutResponse(new TextEncoder().encode("0,0,0,0,99"));
+    } catch (e) {}
+  }
+  if (bleDev && bleDev.gatt.connected) {
+    bleDev.gatt.disconnect();
+  }
+  setTimeout(() => {
+    window.location.href = 'http://192.168.4.1';
+  }, 400);
+}
+
 async function send(force) {
   const now = Date.now();
   if (!bleChar || (!force && (busy || now - last < 25))) return;
   last = now; busy = true;
-  const buf = new Int8Array([x, y, cmd]);
+  const text = `${x},${y},${x1},${y1},${cmd}`;
   try {
-    await bleChar.writeValueWithoutResponse(buf);
+    await bleChar.writeValueWithoutResponse(new TextEncoder().encode(text));
   } catch (e) {}
   busy = false;
 }
 
-// Квадратный джойстик
-const bL = document.getElementById('bL'), sL = document.getElementById('sL');
-let joyId = -1;
+const jL = { id: null, b: document.getElementById('bL'), s: document.getElementById('sL') };
+const jR = { id: null, b: document.getElementById('bR'), s: document.getElementById('sR') };
 
-document.addEventListener('touchstart', e => {
-  for (let t of e.changedTouches) {
-    let el = document.elementFromPoint(t.clientX, t.clientY);
-    if (joyId < 0 && el === bL) { joyId = t.identifier; moveJoy(t); }
-    else if (el && el.classList.contains('cmd')) {
-      el.classList.add('act');
-      cmd = parseInt(el.dataset.c);
-      send(true);
-    }
-  }
-  if (e.cancelable) e.preventDefault();
-}, { passive: false });
-
-document.addEventListener('touchmove', e => {
-  for (let t of e.changedTouches) {
-    if (t.identifier === joyId) moveJoy(t);
-    else {
-      // Позволяет водить зажатым пальцем между кнопками Q-E-R-T-Y
-      let el = document.elementFromPoint(t.clientX, t.clientY);
-      document.querySelectorAll('.cmd').forEach(b => b.classList.remove('act'));
-      if (el && el.classList.contains('cmd')) {
-        el.classList.add('act');
-        let newCmd = parseInt(el.dataset.c);
-        if (newCmd !== cmd) { cmd = newCmd; send(true); }
-      } else if (cmd !== 0) { cmd = 0; send(true); }
-    }
-  }
-  if (e.cancelable) e.preventDefault();
-}, { passive: false });
-
-document.addEventListener('touchend', e => {
-  for (let t of e.changedTouches) {
-    if (t.identifier === joyId) {
-      joyId = -1; x = 0; y = 0;
-      sL.style.transform = 'translate(0px,0px)';
-      send(true);
-    } else {
-      document.querySelectorAll('.cmd').forEach(b => b.classList.remove('act'));
-      if (cmd !== 0) { cmd = 0; send(true); }
-    }
+document.addEventListener('pointerdown', e => {
+  let el = document.elementFromPoint(e.clientX, e.clientY);
+  if (jL.id === null && el === jL.b) { jL.id = e.pointerId; moveJoy(e, jL, 1); }
+  else if (jR.id === null && el === jR.b) { jR.id = e.pointerId; moveJoy(e, jR, 2); }
+  else if (el && el.classList.contains('cmd')) {
+    el.classList.add('act');
+    cmd = parseInt(el.dataset.c);
+    send(true);
   }
 });
 
-function moveJoy(t) {
-  const r = bL.getBoundingClientRect();
-  let dx = Math.max(-87, Math.min(87, t.clientX - (r.left + 110)));
-  let dy = Math.max(-87, Math.min(87, t.clientY - (r.top + 110)));
-  sL.style.transform = `translate(${dx}px, ${dy}px)`;
-  x = Math.round((dx / 87) * 127);
-  y = Math.round((-dy / 87) * 127);
+document.addEventListener('pointermove', e => {
+  if (e.pointerId === jL.id) moveJoy(e, jL, 1);
+  else if (e.pointerId === jR.id) moveJoy(e, jR, 2);
+  else if (e.buttons > 0) {
+    let el = document.elementFromPoint(e.clientX, e.clientY);
+    document.querySelectorAll('.cmd').forEach(b => b.classList.remove('act'));
+    if (el && el.classList.contains('cmd')) {
+      el.classList.add('act');
+      let newCmd = parseInt(el.dataset.c);
+      if (newCmd !== cmd) { cmd = newCmd; send(true); }
+    } else if (cmd !== 0) { cmd = 0; send(true); }
+  }
+});
+
+function releasePointer(e) {
+  if (e.pointerId === jL.id) {
+    jL.id = null; x = 0; y = 0;
+    jL.s.style.transform = 'translate(0px,0px)';
+    send(true);
+  } else if (e.pointerId === jR.id) {
+    jR.id = null; x1 = 0; y1 = 0;
+    jR.s.style.transform = 'translate(0px,0px)';
+    send(true);
+  } else {
+    document.querySelectorAll('.cmd').forEach(b => b.classList.remove('act'));
+    if (cmd !== 0) { cmd = 0; send(true); }
+  }
+}
+document.addEventListener('pointerup', releasePointer);
+document.addEventListener('pointercancel', releasePointer);
+
+function moveJoy(e, j, num) {
+  const r = j.b.getBoundingClientRect();
+  let dx = Math.max(-60, Math.min(60, e.clientX - (r.left + 80)));
+  let dy = Math.max(-60, Math.min(60, e.clientY - (r.top + 80)));
+  j.s.style.transform = `translate(${dx}px, ${dy}px)`;
+  let valX = Math.round((dx / 60) * 255);
+  let valY = Math.round((-dy / 60) * 255);
+  if (num === 1) { x = valX; y = valY; }
+  else { x1 = valX; y1 = valY; }
   send(false);
 }
+
+const keys = { KeyW:0, KeyA:0, KeyS:0, KeyD:0, KeyO:0, KeyK:0, KeyL:0, Semicolon:0, ArrowUp:0, ArrowDown:0, ArrowLeft:0, ArrowRight:0 };
+const btnCodes = { KeyQ:1, KeyE:2, KeyR:3, KeyT:4, KeyY:5 };
+
+function handleKey(e) {
+  if (e.repeat) return;
+  const down = (e.type === 'keydown');
+  const code = e.code;
+
+  if (code in btnCodes) {
+    cmd = down ? btnCodes[code] : 0;
+    document.querySelectorAll('.cmd').forEach(b => {
+      b.classList.toggle('act', down && parseInt(b.dataset.c) === cmd);
+    });
+    send(true);
+    return;
+  }
+
+  if (code in keys) {
+    keys[code] = down ? 1 : 0;
+
+    x = (keys.KeyD - keys.KeyA) * 255;
+    y = (keys.KeyW - keys.KeyS) * 255;
+    x1 = ((keys.Semicolon || keys.ArrowRight) - (keys.KeyK || keys.ArrowLeft)) * 255;
+    y1 = ((keys.KeyO || keys.ArrowUp) - (keys.KeyL || keys.ArrowDown)) * 255;
+
+    jL.s.style.transform = `translate(${(x / 255) * 60}px, ${(-y / 255) * 60}px)`;
+    jR.s.style.transform = `translate(${(x1 / 255) * 60}px, ${(-y1 / 255) * 60}px)`;
+    send(true);
+  }
+}
+window.addEventListener('keydown', handleKey);
+window.addEventListener('keyup', handleKey);
 </script>
 </body>
 </html>
